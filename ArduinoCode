@@ -1,0 +1,1074 @@
+
+/*
+  Inkubator Projekt:
+
+
+  Funktioniert:   RTC, (SD-CARD), TEMP, HUMIDITY, (ALARM,) (LCD), MOTOR
+
+  To do:         DOOR SWITCH, (Nextion LCD), SMS ALARM, INA 219, FAN Regler, acrealoto fü rmotor position
+
+  - Kein delay sondern while loop https://learn.adafruit.com/multi-tasking-the-arduino-part-1/ditch-the-delay
+  - Optimizing SRAM: https://learn.adafruit.com/memories-of-an-arduino/optimizing-sram
+  - Barometer
+  - Noise Detector
+  - CO2 Detector
+  - Waterlevel Sensor and Alarm
+  - ESP8266 with sparkfundata
+  - PID Controller
+  - Change Temp Sensor zu SHT75 oder zu PT100 mit MAX31865
+  - Restructure Programm with functions
+
+
+
+  Code for the eeprom stuff
+
+  unsigned long keyPrevMillis = 0;
+  const unsigned long keySampleIntervalMs = 25;
+  byte longKeyPressCountMax = 80;    // 80 * 25 = 2000 ms
+  byte longKeyPressCount = 0;
+
+  byte prevKeyState = HIGH;         // button is active low
+  const byte keyPin = 2;            // button is connected to pin 2 and GND
+
+
+  // called when button is kept pressed for less than 2 seconds
+  void shortKeyPress() {
+    Serial.println("short");
+  }
+
+
+  // called when button is kept pressed for more than 2 seconds
+  void longKeyPress() {
+    Serial.println("long");
+  }
+
+
+  // called when key goes from not pressed to pressed
+  void keyPress() {
+    Serial.println("key press");
+    longKeyPressCount = 0;
+  }
+
+
+  // called when key goes from pressed to not pressed
+  void keyRelease() {
+    Serial.println("key release");
+
+    if (longKeyPressCount >= longKeyPressCountMax) {
+        longKeyPress();
+    }
+    else {
+        shortKeyPress();
+    }
+  }
+
+
+  void setup() {
+    Serial.begin(115200);
+    pinMode(keyPin, INPUT_PULLUP);
+  }
+
+
+  void loop() {
+    // key management section
+    if (millis() - keyPrevMillis >= keySampleIntervalMs) {
+        keyPrevMillis = millis();
+
+        byte currKeyState = digitalRead(keyPin);
+
+        if ((prevKeyState == HIGH) && (currKeyState == LOW)) {
+            keyPress();
+        }
+        else if ((prevKeyState == LOW) && (currKeyState == HIGH)) {
+            keyRelease();
+        }
+        else if (currKeyState == LOW) {
+            longKeyPressCount++;
+        }
+
+        prevKeyState = currKeyState;
+    }
+
+
+    // other code goes here
+  }
+
+
+
+
+
+
+
+*/
+
+
+// Libraries
+
+#include <GSM.h>
+
+#include <Wire.h>
+
+#include "RTClib.h"                      // Bearbeitet OFF zu OFFF weil sonst konflikt mit GSM.h
+
+#include <LiquidCrystal_I2C.h>          // LiquidCrystal Arduino library for the DFRobot I2C LCD displays works
+
+#include <EEPROM.h>
+
+#include <SD.h>
+
+#include <SPI.h>
+
+#include <DHT.h>                         // Temperatur Sensor
+
+#include <Stepper.h>                     // Stepper Library
+
+#include <avr/wdt.h>                     // Watchdog Library
+
+
+// Global Variables sollten besser zu den jeweiligen Sensoren zugeordnet werden
+
+
+int startMinute;                      // Eventuell zu Byte umwandeln? int= 0-32700 byte= 0-255
+int startHour;
+int startMonth;
+int startDay;
+
+long startUnix;                        // Das sollte noch in den EMPROM geschrieben werden.
+long hatchDay;
+
+int elapsedHour;
+int elapsedSec;
+
+long remainHour;
+
+float minTemp = 50;                    // Muessen noch angepasst werden
+float maxTemp = 0;                     // Muessen noch angepasst werden
+
+byte minHumidity = 90;                // byte weil praezision ausreicht
+byte maxHumidity = 10;
+
+int motorStepCount = 0;                 // Byte reicht?
+
+long lastMillis;                       // For Loop measurement
+long currentMillis;                    // For Loop measurement
+
+boolean door;                           // Door open or closed
+
+boolean dailySMS;                        // Checks if daly SMS has already been sent
+
+
+
+// int Pins
+
+const int ledPin =           15;              // Random LED Pin for testing
+const int speakerOut =       12;              // Pin for Piezo Alarm
+const int relaysHeating =    8;               // Relays Pin for Heating
+const int relaysAtomizer =   9;               // Relays Pin for Water Atomzyer
+const int Door =             5;               // Door switch
+
+#define DHTPIN_A  42
+#define DHTPIN_B   4                          // TempSensor 2
+
+
+
+
+// LCD
+
+LiquidCrystal_I2C lcd(0x27, 20, 4);        // set the LCD address to 0x27 for a 20 chars and 4 line display
+
+
+// RTC
+
+RTC_DS3231 rtc;
+
+char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+
+// DHT 22
+
+#define DHTTYPE DHT22
+DHT dht_A(DHTPIN_A, DHTTYPE);
+DHT dht_B(DHTPIN_B, DHTTYPE);
+
+
+// SD Card
+
+//   SD: Miso 50, CS 53, SCK 52, MOSI 51
+
+File myFile;
+
+// EEPROM Settings
+
+void EEPROMWritelong(int address, long value)                   // EEPROM does work, but not the way it should: Everytime Arduino starts, IT resets the day. I need a START BUTTON in oder to avoid that.
+{
+  //Decomposition from a long to 4 bytes by using bitshift.
+  //One = Most significant -> Four = Least significant byte
+  byte four = (value & 0xFF);
+  byte three = ((value >> 8) & 0xFF);
+  byte two = ((value >> 16) & 0xFF);
+  byte one = ((value >> 24) & 0xFF);
+
+  //Write the 4 bytes into the eeprom memory.
+  EEPROM.write(address, four);
+  EEPROM.write(address + 1, three);
+  EEPROM.write(address + 2, two);
+  EEPROM.write(address + 3, one);
+}
+
+long EEPROMReadlong(long address)
+{
+  //Read the 4 bytes from the eeprom memory.
+  long four = EEPROM.read(address);
+  long three = EEPROM.read(address + 1);
+  long two = EEPROM.read(address + 2);
+  long one = EEPROM.read(address + 3);
+
+  //Return the recomposed long by using bitshift.
+  return ((four << 0) & 0xFF) + ((three << 8) & 0xFFFF) + ((two << 16) & 0xFFFFFF) + ((one << 24) & 0xFFFFFFFF);
+}
+
+long address = 0;
+
+
+// Stepper Nema 17
+
+#define STEPS 200                                   //Steps the motor has
+Stepper stepper(STEPS, 9, 11, 12, 13);             // 10 muss noch gewechselt werden, weil mit GSM shield in Konflikt. Jetzt 9
+
+
+
+// GSM 900
+
+GSM gsmAccess;
+GSM_SMS sms;
+
+char senderNumber[20];          // Array to hold the number a SMS is retreived from
+
+
+void setup () {
+
+  // Setup serial
+
+  Serial.begin(115200);
+
+
+  // Setup LCD
+
+
+  lcd.init();
+  lcd.backlight();
+  Serial.println("LCD starts!");
+
+  lcd.setCursor(0, 0);
+  lcd.print("Start:");
+  delay(1000);
+  lcd.setCursor(0, 1);
+  lcd.print("LCD  OK!");
+  delay(1000);
+
+
+  // PinModes
+
+  pinMode(ledPin, OUTPUT);
+  pinMode(speakerOut, OUTPUT);
+  pinMode(relaysHeating, OUTPUT);
+  pinMode(relaysAtomizer, OUTPUT);
+
+
+  // Setup RTC
+
+  rtc.begin();
+  Serial.println("RTC starts!");
+
+  lcd.setCursor(0, 2);
+  lcd.print("RTC OK!");
+  delay(1000);
+
+
+  if (rtc.lostPower()) {
+    Serial.println("RTC lost power, lets set the time!");
+    // following line sets the RTC to the date & time this sketch was compiled
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // This line sets the RTC with an explicit date & time, for example to set
+    // January 21, 2014 at 3am you would call:
+    // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
+  }
+
+
+
+  DateTime now = rtc.now();
+
+  startMinute = now.minute();
+  startHour = now.hour();
+  startMonth = now.month();
+  startDay = now.day();
+  startUnix = now.unixtime();
+  hatchDay = now.unixtime() + 18 * 86400L;
+
+
+
+  // Setup DHT
+
+  dht_A.begin();
+  dht_B.begin();
+
+  Serial.println("DHT22 starts!");
+
+  lcd.setCursor(12, 0);
+  lcd.print("DHT OK!");
+  delay(1000);
+
+
+  // Start GSM
+
+
+  boolean notConnected = true;
+
+  while (notConnected) {
+    if (gsmAccess.begin() == GSM_READY) {
+      notConnected = false;
+
+      Serial.println("Start GSM");
+      lcd.setCursor(12, 1);
+      lcd.print("GSM OK!");
+    }
+
+    else {
+      Serial.println("Not connected");
+      lcd.setCursor(12, 1);
+      lcd.print("GSM fail");
+    }
+  }
+
+
+  // Init SD Card
+
+
+  if (SD.begin(53)) {
+
+    Serial.println("SD initialization done!");
+
+    lcd.setCursor(0, 3);
+    lcd.print("SD Card OK!");
+
+  }
+
+  else {
+    Serial.println("SD initialization failed!");
+
+    lcd.setCursor(0, 3);
+    lcd.print("SD Card fail");
+
+  }
+
+
+
+
+  //Writing long for EPROM
+
+  EEPROMWritelong(address, startUnix);
+  address += 4;
+
+
+  // Set Stepper Speed (RPMs, between 0-120?)
+
+  stepper.setSpeed(10);
+
+  lcd.setCursor(10, 2);
+  lcd.print("Stepper OK");
+
+
+
+
+
+
+
+  // LCD Prints for the normal Mode
+
+  delay(2000);                     // Wait 2 seconds so user has time to check display
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("TEMPERATURE");
+  lcd.setCursor(19, 0);
+  lcd.print("C");
+
+  lcd.setCursor(0, 1);
+  lcd.print("HUMIDITY");
+  lcd.setCursor(19, 1);
+  lcd.print("%");
+
+  lcd.setCursor(0, 2);
+  lcd.print("RUNS");
+
+  lcd.setCursor(10, 2);
+  lcd.print("ENDS");
+
+
+  // Setup Watchdog
+
+  wdt_enable(WDTO_8S);                    // 8 sekunden watchdog. alternative: WDTO_4S
+
+
+}
+
+
+void loop () {
+
+
+  delay(2010);                                      // Delay in order to avoid too many sensor readouts with the DHT22. not more than everz 2 seconds
+  // This needs to be changed to Millis because with delay the Proccesor does not respond (e.g. Touchscreen)
+  // example: https://learn.adafruit.com/multi-tasking-the-arduino-part-1/using-millis-for-timing Object Oriented Programming.
+  // This will be obsolete with MAX und PT100.
+
+
+  currentMillis = millis();                            // Starts the Loop Counter
+
+
+
+  // Read time from RTC
+
+  DateTime now = rtc.now();
+
+  // Read Temp and Humidity
+
+  float humidity = dht_A.readHumidity();
+  float temp = dht_A.readTemperature();
+
+  float humidity2 = dht_B.readHumidity();
+  float temp2 = dht_B.readTemperature();
+
+
+
+  // Prints Time started
+
+  Serial.print("Start:");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.print(startHour);
+  Serial.print(':');
+  Serial.print(startMinute);
+  Serial.print(':');
+  Serial.print(startMinute);
+
+  Serial.print("\t");
+  Serial.print(startDay);
+  Serial.print(".");
+  Serial.print(startMonth);
+  Serial.println(".");
+
+
+
+  // Calculates Time to go
+
+  remainHour = ((hatchDay - now.unixtime()) / 3600);
+  Serial.print("Remain Hour:");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println(remainHour);
+
+
+
+  // Calculates Time elapsed
+
+  elapsedSec = (now.unixtime() - EEPROMReadlong(0));          // startUnix sollte von EPROM ausgelesen werden.
+
+  elapsedHour = (elapsedSec / 3600);
+  Serial.print("Elapsed Hour:");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println(elapsedHour);
+
+
+  // Prints Date and Time
+
+  Serial.print("Date Now:");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.print(now.hour(), DEC);
+  Serial.print(':');
+  Serial.print(now.minute(), DEC);
+  Serial.print(':');
+  Serial.print(now.second(), DEC);
+  Serial.print("\t");
+  Serial.print(daysOfTheWeek[now.dayOfTheWeek()]);
+  Serial.print(" ");
+  Serial.print(now.day(), DEC);
+  Serial.print('.');
+  Serial.print(now.month(), DEC);
+  Serial.print('.');
+  Serial.println(now.year(), DEC);
+
+
+  // Min und Max Temp and Humidity and Print
+
+  Serial.print("Min Temp:");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println(minTemp);
+
+  Serial.print("Max Temp:");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println(maxTemp);
+
+  if (temp < minTemp) {
+    minTemp = temp;
+  }
+
+  if (temp > maxTemp) {
+    maxTemp = temp;
+  }
+
+  Serial.print("Min Hum:");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println(minHumidity);
+
+  Serial.print("Max Hum:");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println(maxHumidity);
+
+  if (humidity < minHumidity) {
+    minHumidity = humidity;
+  }
+
+  if (humidity > maxHumidity) {
+    maxHumidity = humidity;
+  }
+  // Print Sensor Werte DHT22
+
+  Serial.print("Humidity: ");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.print(humidity);
+  Serial.println(" % ");
+
+  Serial.print("Temperature: ");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.print(temp);
+  Serial.println(" C ");
+
+  Serial.print("Humidity 2: ");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.print(humidity2);
+  Serial.println(" % ");
+
+  Serial.print("Temperature 2: ");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.print(temp2);
+  Serial.println(" C ");
+
+  // Temp Controll           noch global variables like heating=on zerstäuber=on
+
+  if (elapsedHour < 360) {                                  // Day 1 - 15
+
+    if (temp < 20.7 ) {
+      digitalWrite(relaysHeating, HIGH);
+      Serial.print("Heizung:");
+      Serial.print("\t");
+      Serial.print("\t");
+      Serial.println("On (< 15 d)");
+    }
+    if (temp > 20.9) {
+      digitalWrite(relaysHeating, LOW);
+      Serial.print("Heizung:");
+      Serial.print("\t");
+      Serial.print("\t");
+      Serial.println("Off (< 15 d)");
+    }
+  }
+  else if (elapsedHour > 360) {                             // From day 15 lower Temp
+
+    if (temp < 20.4 ) {
+      digitalWrite(relaysHeating, HIGH);
+      Serial.println("Heizung LAUFT und mehr als 15 Tage");
+    }
+    if (temp > 20.7) {
+      digitalWrite(relaysHeating, LOW);
+      Serial.println("Heizung LAUFT NICHT und mehr als 15 Tage");
+    }
+  }
+
+  // Humidity Controll
+
+
+  if (elapsedHour < 321) {                                  // From Days 1- 14
+
+    if (humidity < 52.0) {
+      digitalWrite(relaysAtomizer, HIGH);
+      Serial.print("Zerstauber:");
+      Serial.print("\t");
+      Serial.print("\t");
+      Serial.println("On (< 14 d)");
+    }
+    if (humidity > 55.0) {
+      digitalWrite(relaysAtomizer, LOW);
+      Serial.print("Zerstauber:");
+      Serial.print("\t");
+      Serial.print("\t");
+      Serial.println("Off (< 14 d)");
+    }
+  }
+  else if (elapsedHour < 345) {                          // Less than 15 Day
+
+    if (humidity < 58.0) {
+      digitalWrite(relaysAtomizer, HIGH);
+      Serial.println("Zerstauber lauft und 15 Tage");
+
+    }
+    if (humidity > 61.0) {
+      digitalWrite(relaysAtomizer, LOW);
+      Serial.println("Zerstauber lauft nicht und 15 Tage");
+    }
+  }
+  else if (elapsedHour < 369) {                          // Less than 16 Day
+
+    if (humidity < 64.0) {
+      digitalWrite(relaysAtomizer, HIGH);
+      Serial.println("Zerstauber lauft und 16 Tage");
+    }
+    if (humidity > 66.0) {
+      digitalWrite(relaysAtomizer, LOW);
+      Serial.println("Zerstauber lauft nicht und 16 Tage");
+    }
+  }
+  else if (elapsedHour < 369) {                          // More than 17 Day
+
+    if (humidity < 70.0) {
+      digitalWrite(relaysAtomizer, HIGH);
+      Serial.println("Zerstauber lauft und 17 Tage und mehr");
+    }
+    if (humidity > 75.0) {
+      digitalWrite(relaysAtomizer, LOW);
+      Serial.println("Zerstauber lauft nicht und 17 Tage und mehr");
+    }
+  }
+
+  // Alarm Funktion (wenn Temp zu hoch oder zu niedrig) NOCH Überarbeiten logischer operator ist falsch nur ein &, am besten ein ODER rein, oder unterschieldichen Alarm für zu tief oder zu warm
+
+  if (temp < 37.9 && temp > 20.0) {
+    noTone(speakerOut);
+  }
+
+  if (temp > 23.9) {
+    tone(speakerOut, 75);
+    Serial.print("Alarm:");
+    Serial.print("\t");
+    Serial.print("\t");
+    Serial.print("\t");
+    Serial.println("Zu hot");
+  }
+
+  if (temp < 20.0) {
+    tone(speakerOut, 32);
+    Serial.print("Alarm:");
+    Serial.print("\t");
+    Serial.print("\t");
+    Serial.print("\t");
+    Serial.println("Zu kalt!");
+  }
+
+
+
+  // Drehen des Motors
+
+  if (elapsedHour < 369)                        // Motor soll nicht bis zum Schluss drehen, 3 Tage vor der Brut anhalten.
+
+    switch (now.hour()) {                     // Cases entsprechen den Stunden
+
+
+      case 0:
+
+        while (motorStepCount < 100) {
+          motorStepCount++;                        // Achtung! Wenn delay von 2 sekunden oben weg ist, dann geht das drehen ev. viel schneller.
+          stepper.step(1);
+
+          Serial.print("Motor Anzahl Schritte :");
+          Serial.print("\t");
+          Serial.print("\t");
+          Serial.println(motorStepCount);
+          break;
+        }
+
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("Motor dreht in dieser Stunde vorwährts ");
+        Serial.print("\t");
+        Serial.println("Es ist 0 Uhr");
+        break;
+
+      case 1:
+
+        motorStepCount = 0;
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("motorStepCount wurde auf 0 gestellt");
+        break;
+
+
+      case 4:
+
+        while (motorStepCount < 100) {
+          motorStepCount++;
+          stepper.step(-1);
+
+          Serial.print("Motor Anzahl Schritte :");
+          Serial.print("\t");
+          Serial.print("\t");
+          Serial.println(motorStepCount);
+          break;
+        }
+
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("Motor dreht in dieser Stunde rückwärts ");
+        Serial.print("\t");
+        Serial.println("Es ist 3 Uhr");
+        break;
+
+      case 5:
+
+        motorStepCount = 0;
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("motorStepCount wurde auf 0 gestellt");
+        break;
+
+      case 8:
+
+        while (motorStepCount < 100) {
+          motorStepCount++;
+          stepper.step(1);
+
+          Serial.print("Motor Anzahl Schritte :");
+          Serial.print("\t");
+          Serial.print("\t");
+          Serial.println(motorStepCount);
+          break;
+        }
+
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("Motor dreht in dieser Stunde vorwährts ");
+        Serial.print("\t");
+        Serial.println("Es ist 0 Uhr");
+        break;
+
+
+
+      case 9:
+
+        motorStepCount = 0;
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("motorStepCount wurde auf 0 gestellt");
+        break;
+
+      case 12:
+
+        while (motorStepCount < 100) {
+          motorStepCount++;
+          stepper.step(-1);
+
+          Serial.print("Motor Anzahl Schritte :");
+          Serial.print("\t");
+          Serial.print("\t");
+          Serial.println(motorStepCount);
+          break;
+        }
+
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("Motor dreht in dieser Stunde rückwärts ");
+        Serial.print("\t");
+        Serial.println("Es ist 3 Uhr");
+        break;
+
+      case 13:
+
+        motorStepCount = 0;
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("motorStepCount wurde auf 0 gestellt");
+        break;
+
+      case 16:
+
+        while (motorStepCount < 100) {
+          motorStepCount++;
+          stepper.step(1);
+
+          Serial.print("Motor Anzahl Schritte :");
+          Serial.print("\t");
+          Serial.print("\t");
+          Serial.println(motorStepCount);
+          break;
+        }
+
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("Motor dreht in dieser Stunde vorwährts ");
+        Serial.print("\t");
+        Serial.println("Es ist 16 Uhr");
+        break;
+
+      case 17:
+
+        motorStepCount = 0;
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("motorStepCount wurde auf 0 gestellt");
+        break;
+
+
+      case 20:
+
+        while (motorStepCount < 100) {
+          motorStepCount++;
+          stepper.step(-1);
+
+          Serial.print("Motor Anzahl Schritte :");
+          Serial.print("\t");
+          Serial.print("\t");
+          Serial.println(motorStepCount);
+          break;
+        }
+
+        Serial.print("Motor :");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("\t");
+        Serial.print("Motor dreht in dieser Stunde rückwärts ");
+        Serial.print("\t");
+        Serial.println("Es ist 20 Uhr");
+        break;
+    }
+}
+
+
+
+// Data String for the SD Card
+
+String dataString = "";                         // Creates a String named dataString
+
+dataString += String(now.day());
+dataString += ";";
+dataString += String(now.month());
+dataString += ";";
+dataString += String(now.year());
+dataString += ";";
+dataString += String(now.hour());
+dataString += ";";
+dataString += String(now.minute());
+dataString += ";";
+dataString += String(now.second());
+dataString += ";";
+
+dataString += String(temp);
+dataString += ";";
+dataString += String(humidity);
+dataString += ";";
+
+dataString += String(temp2);
+dataString += ";";
+dataString += String(humidity2);
+dataString += ";";
+
+dataString += String(remainHour);
+dataString += ";";
+dataString += String(elapsedHour);
+dataString += ";";
+dataString += String(elapsedSec);
+dataString += ";";
+
+
+
+Serial.print("DataString:");
+Serial.print("\t");
+Serial.print("\t");
+Serial.println(dataString);
+
+
+
+// Data String for daily SMS:
+
+
+
+
+
+// SD Card Logging
+
+
+myFile = SD.open("Log.txt", FILE_WRITE);
+
+if (myFile) {                                   // if the file opened okay, write to it:
+
+  myFile.println(dataString);                   // Print DataString
+  myFile.close();                               // close the file
+
+  Serial.print("SD Card Status");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println("Wrote to SD Card");
+
+} else {
+
+  Serial.print("SD Card Status");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println("NO WRITING to SD Card");
+}
+
+// Magnetic Door Switch
+
+
+
+
+// Print to LCD
+
+
+lcd.setCursor(12, 0);
+lcd.print(temp);
+
+lcd.setCursor(12, 1);
+lcd.print(humidity);
+
+lcd.setCursor(5, 2);
+lcd.print(elapsedHour);
+lcd.setCursor(16, 2);
+lcd.print(remainHour);
+
+
+lcd.setCursor(0, 3);
+lcd.print("Schritte: ");
+lcd.setCursor(10, 3);
+lcd.print(motorStepCount);
+
+// GLobal Variable print to serial.
+
+Serial.print("EEPROM startUnix:");
+Serial.print("\t");
+Serial.print("\t");
+Serial.println(EEPROMReadlong(0));
+
+Serial.print("startUnix:");
+Serial.print("\t");
+Serial.print("\t");
+Serial.println(startUnix);
+
+Serial.print("hatchday:");
+Serial.print("\t");
+Serial.print("\t");
+Serial.println(hatchDay);
+
+
+// SMS Report
+
+if (now.hour() == 16 && dailySMS == true) {                      // Um 16 Uhr Tages Report
+
+  Serial.print("Send daily SMS");
+
+  dailySMS = false;
+  sms.beginSMS(+4915115537405);
+  sms.print(dataString);                            // data String; Daily Report: (h to go, medium temp/humidity, temp now)
+  sms.endSMS();
+
+}
+
+if (now.hour() == 17) {
+
+  Serial.print("reset daily SMS");
+  dailySMS = true;
+
+}
+
+// SMS Status Abfrage
+
+
+if (sms.available()) {
+
+
+  sms.remoteNumber(senderNumber, 20);
+
+  Serial.print("Message received from::");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println(senderNumber);
+
+  char c;
+
+  while (c = sms.read()) {        // Read message bytes and print them
+
+    Serial.print("Inhalt");
+    Serial.print("\t");
+    Serial.print("\t");
+    Serial.print(c);
+    // ein case wäre nett. Wenn SMS "temp" / "motor" enthält; dann gezielte INformationen dazu.
+  }
+
+  sms.flush();
+
+  Serial.print("SMS");
+  Serial.print("\t");
+  Serial.print("\t");
+  Serial.println("MESSAGE DELETED");
+}
+
+// Reset watchdog
+
+wdt_reset();
+
+
+// Loop Time Ende
+
+Serial.print("Loop Time:");
+Serial.print("\t");
+Serial.print("\t");
+Serial.println(currentMillis - lastMillis);
+lastMillis = millis();
+
+
+
+
+// Zeilenabstand
+
+
+Serial.println();
+}
+
+
+
+
+
+
+
+
+
+
+
+
