@@ -5,8 +5,8 @@
 
   Funktioniert:   RTC, (SD-CARD), TEMP, HUMIDITY, (ALARM,) (LCD), MOTOR
 
-  To do:         DOOR SWITCH, (Nextion LCD), SMS ALARM, INA 219, FAN Regler, acrealoto fü rmotor position
-
+  To do:         DOOR SWITCH, (Nextion LCD), FAN Regler,
+  
   - Kein delay sondern while loop https://learn.adafruit.com/multi-tasking-the-arduino-part-1/ditch-the-delay
   - Optimizing SRAM: https://learn.adafruit.com/memories-of-an-arduino/optimizing-sram
   - Barometer
